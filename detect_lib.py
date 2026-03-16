@@ -853,14 +853,16 @@ class App:
             self.write("-" * 50 + "\n")
 
             if not r.get("found"):
-                self.write(f"Not found: {r.get('reason', 'unknown')}\n\n")
+                self.text.insert("end", f"Not found: {r.get('reason', 'unknown')}\n\n", ("row_red",))
+                self.text.see("end")
                 continue
 
             self.write(f"Coins: {r.get('coins')}\n")
 
             units = r.get("units", [])
             if not units:
-                self.write("Units: none detected\n\n")
+                self.text.insert("end", "Units: none detected\n\n", ("row_red",))
+                self.text.see("end")
                 continue
 
             self.write("Units:\n")
