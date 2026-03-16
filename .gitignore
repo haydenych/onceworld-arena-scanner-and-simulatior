@@ -1,0 +1,5 @@
+.vscode/
+__pycache__/
+
+dataset_enemy_icons/*
+!dataset_enemy_icons/.gitkeep
