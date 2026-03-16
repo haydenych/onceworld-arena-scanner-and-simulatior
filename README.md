@@ -22,6 +22,8 @@ Use this section if you only want to run detection.
 ### Notes
 - Checkpoints are auto-detected from `checkpoints/` (latest `unit_resnet18_*.pt`).
 - `detect_dev.py` is not needed for normal use.
+- For better detection accuracy, use a larger game/emulator window size so arena monster icons are roughly in the 50-90 px range.
+- The icon classifier was mainly trained on monster icons around 50-90 px; much smaller icons can reduce detection quality.
 
 ## For developers
 
@@ -46,3 +48,11 @@ Use this section for dataset collection, labeling, and training workflows.
 ### Shared internals
 - `detect_common.py` keeps shared detector geometry/constants to reduce drift between runtime and dev collection code.
 - `user_config.py` is intentionally minimal and end-user focused.
+
+## Battle Simulation Credit
+
+Battle simulation logic in this project follows and is adapted from:
+
+https://github.com/nekocant/onceworld_arena_sim/tree/main
+
+Full credit for the battle simulation logic and design goes to the original `onceworld_arena_sim` project and its author(s).
