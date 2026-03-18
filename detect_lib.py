@@ -4,13 +4,27 @@ import csv
 import random
 import math
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk, messagebox
 
 import cv2
 import mss
 import numpy as np
 import pytesseract
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTextEdit,
+    QFrame,
+    QMessageBox,
+    QSizePolicy,
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QColor, QPalette, QTextCursor, QIcon, QPixmap, QImage, QPainter, QPen, QFontMetrics
+import sys
 from battle_logic import Monster, Field
 from detect_common import (
     COIN_ZONE,
@@ -31,9 +45,12 @@ from detect_common import (
 )
 import user_config
 
-# Optional OCR executable override from user config.
-if user_config.TESSERACT_CMD:
-    pytesseract.pytesseract.tesseract_cmd = user_config.TESSERACT_CMD
+default_tess = os.path.join(os.path.dirname(__file__), "Tesseract-OCR", "tesseract.exe")
+tess_cmd = user_config.TESSERACT_CMD
+if not tess_cmd and os.path.isfile(default_tess):
+    tess_cmd = default_tess
+if tess_cmd:
+    pytesseract.pytesseract.tesseract_cmd = tess_cmd
 
 # ============================================================
 # Config
@@ -42,26 +59,23 @@ if user_config.TESSERACT_CMD:
 ASSET_DIR = "assets"
 ANCHOR_DIR = os.path.join(ASSET_DIR, "anchors")
 
-# Multi-scale search ranges
 ANCHOR_SCALES = np.asarray(user_config.ANCHOR_SCALES, dtype=float)
 
-# Thresholds
 ANCHOR_THRESHOLD = float(user_config.ANCHOR_THRESHOLD)
 UNIT_THRESHOLD = 0.20
 UNIT_MARGIN_THRESHOLD = 0.02
 UNIT_WARN_THRESHOLD = 0.35
 
-# Model checkpoint
 CHECKPOINT_DIR = "checkpoints"
 CHECKPOINT_GLOB = "unit_resnet18_*.pt"
-ANCHOR_DEBUG_ALL_SCALES = True
+ANCHOR_DEBUG_ALL_SCALES = False
 UNLABELED_ICON_DIR = "dataset_enemy_icons"
 UNLABELED_ICON_PREFIX = "img"
 UNLABELED_ICON_DIGITS = 4
 BATTLE_MONSTERS_CSV = "monsters.csv"
-BATTLE_SIM_TRIALS = 120
-BATTLE_SIM_DELTA_TIME = 0.02
-BATTLE_SIM_DURATION = 40.0
+BATTLE_SIM_TRIALS = 8
+BATTLE_SIM_DELTA_TIME = 0.04
+BATTLE_SIM_DURATION = 18.0
 
 # Row/enemy/coin geometry is shared from detect_common.py
 
@@ -72,6 +86,28 @@ TESS_CONFIG_COIN = r'--psm 7 -c tessedit_char_whitelist=0123456789xX, '
 # ============================================================
 # Utilities
 # ============================================================
+
+def _fmt_pct(x):
+    try:
+        return f"{float(x):.1%}"
+    except Exception:
+        return "n/a"
+
+
+def _fmt_float(x, digits=3):
+    try:
+        return f"{float(x):.{int(digits)}f}"
+    except Exception:
+        return "n/a"
+
+
+def _lerp_color(c1, c2, t):
+    t = max(0.0, min(1.0, float(t)))
+    r = int(c1.red() + (c2.red() - c1.red()) * t)
+    g = int(c1.green() + (c2.green() - c1.green()) * t)
+    b = int(c1.blue() + (c2.blue() - c1.blue()) * t)
+    return QColor(r, g, b)
+
 
 def load_templates(folder):
     templates = {}
@@ -440,7 +476,6 @@ class TorchUnitClassifier:
 
         self.model = model
         self.checkpoint_path = str(ckpt_path)
-        # print(f"[unit-model] loaded checkpoint: {self.checkpoint_path}")
 
     def _find_latest_checkpoint(self, checkpoint_dir):
         root = Path(checkpoint_dir)
@@ -449,7 +484,6 @@ class TorchUnitClassifier:
 
         candidates = list(root.glob(CHECKPOINT_GLOB))
         if not candidates:
-            # fallback to any .pt if naming changed
             candidates = list(root.glob("*.pt"))
         if not candidates:
             raise RuntimeError(f"No checkpoint files found in: {root}")
@@ -772,123 +806,309 @@ class ScreenDetector:
         }
 
 
-# ============================================================
-# GUI
-# ============================================================
-
-class App:
-    def __init__(self, root, save_unlabeled=False):
-        self.root = root
-        self.root.title("Screen Detection")
-        self.root.geometry("900x650")
-
+class MainWindow(QMainWindow):
+    def __init__(self, save_unlabeled=False):
+        super().__init__()
+        self.setWindowTitle("OnceWorld Arena")
+        self.setFixedSize(316, 368)
+        self._set_app_icon()
+        self.detector = None
         try:
             self.detector = ScreenDetector(save_unlabeled=save_unlabeled)
         except Exception as e:
-            messagebox.showerror("Startup error", str(e))
-            root.destroy()
+            QMessageBox.critical(self, "Start", str(e))
+            self.close()
             return
+        self._check_ocr()
+        self._init_palette()
+        self._build_ui()
+        self._set_status("")
 
-        top = ttk.Frame(root, padding=10)
-        top.pack(fill="x")
+    def _set_app_icon(self):
+        size = 64
+        img = QImage(size, size, QImage.Format_ARGB32)
+        img.fill(QColor("#0D1117"))
 
-        self.detect_btn = ttk.Button(top, text="Detect", command=self.on_detect)
-        self.detect_btn.pack(side="left")
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing, True)
 
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
+        pen = QPen(QColor("#21262D"))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.setBrush(QColor("#161B22"))
+        p.drawRoundedRect(4, 4, size - 8, size - 8, 12, 12)
 
-        self.text = tk.Text(root, wrap="word", font=("Consolas", 11))
-        self.text.pack(fill="both", expand=True, padx=10, pady=10)
-        self.text.tag_configure("row_red", foreground="red")
-        self.text.tag_configure("row_yellow", foreground="goldenrod")
+        pen2 = QPen(QColor("#58A6FF"))
+        pen2.setWidth(5)
+        pen2.setCapStyle(Qt.RoundCap)
+        p.setPen(pen2)
+        p.drawLine(18, 38, 30, 26)
+        p.drawLine(30, 26, 46, 42)
 
-        self.write("Ready.\n")
+        p.end()
 
-    def write(self, s):
-        self.text.insert("end", s)
-        self.text.see("end")
+        px = QPixmap.fromImage(img)
+        self.setWindowIcon(QIcon(px))
 
-    def on_detect(self):
-        self.detect_btn.config(state="disabled")
-        self.status_var.set("Detecting...")
-        self.root.update_idletasks()
+    def _init_palette(self):
+        self.c_bg = QColor("#0D1117")
+        self.c_panel = QColor("#161B22")
+        self.c_panel_soft = QColor("#0D1117")
+        self.c_text = QColor("#C9D1D9")
+        self.c_muted = QColor("#8B949E")
+        self.c_accent = QColor("#58A6FF")
+        self.c_good = QColor("#3FB950")
+        self.c_warn = QColor("#D29922")
+        self.c_bad = QColor("#F85149")
+        self.c_team_a = QColor("#EF4444")  # A: red
+        self.c_team_b = QColor("#3B82F6")  # B: blue
+        self.c_team_c = QColor("#22C55E")  # C: green
+        self.c_prob_lo = QColor("#22C55E")  # green
+        self.c_prob_hi = QColor("#EF4444")  # red
+        self.c_prob_gold = QColor("#FACC15")
+        pal = self.palette()
+        pal.setColor(QPalette.Window, self.c_bg)
+        pal.setColor(QPalette.WindowText, self.c_text)
+        pal.setColor(QPalette.Base, self.c_panel_soft)
+        pal.setColor(QPalette.AlternateBase, self.c_panel)
+        pal.setColor(QPalette.Text, self.c_text)
+        pal.setColor(QPalette.Button, self.c_panel)
+        pal.setColor(QPalette.ButtonText, self.c_text)
+        self.setPalette(pal)
 
+    def _card_frame(self):
+        f = QFrame()
+        f.setFrameShape(QFrame.StyledPanel)
+        f.setFrameShadow(QFrame.Plain)
+        f.setStyleSheet(
+            "QFrame { background-color: #161B22; border: 1px solid #21262D; border-radius: 6px; }"
+        )
+        return f
+
+    def _label(self, text, muted=False, bold=False, large=False):
+        lbl = QLabel(text)
+        font = QFont("Segoe UI", 8)
+        if bold:
+            font.setWeight(QFont.DemiBold)
+        if large:
+            font.setPointSize(14)
+        lbl.setFont(font)
+        if muted:
+            lbl.setStyleSheet("color: #8B949E;")
+        else:
+            lbl.setStyleSheet("color: #C9D1D9;")
+        return lbl
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout()
+        root.setContentsMargins(6, 4, 6, 4)
+        root.setSpacing(3)
+        central.setLayout(root)
+        self.status_label = None
+        top_cards = QHBoxLayout()
+        top_cards.setSpacing(4)
+        card_win = self._card_frame()
+        card_win_layout = QVBoxLayout(card_win)
+        card_win_layout.setContentsMargins(6, 4, 6, 4)
+        card_win_layout.setSpacing(2)
+        card_win_layout.addWidget(self._label("Win", muted=True))
+        win_row = QHBoxLayout()
+        win_row.setSpacing(4)
+        self.win_team_label = self._label("—", bold=True, large=True)
+        win_row.addWidget(self.win_team_label, 0, Qt.AlignLeft)
+        self.win_prob_label = QLabel("—")
+        prob_font = QFont("Segoe UI", 10)
+        prob_font.setWeight(QFont.DemiBold)
+        self.win_prob_label.setFont(prob_font)
+        self.win_prob_label.setStyleSheet("color: #FACC15;")
+        win_row.addWidget(self.win_prob_label, 0, Qt.AlignLeft)
+        self.win_coin_label = self._label("—", muted=True, bold=True)
+        win_row.addWidget(self.win_coin_label, 0, Qt.AlignLeft)
+        win_row.addStretch()
+        card_win_layout.addLayout(win_row)
+        self.scan_btn = QPushButton("Scan")
+        self.scan_btn.setCursor(Qt.PointingHandCursor)
+        self._scan_btn_style_normal = (
+            "QPushButton { background-color: #238636; color: #FFFFFF; border-radius: 4px; padding: 4px 10px; }"
+            "QPushButton:hover { background-color: #2ea043; }"
+            "QPushButton:disabled { background-color: #30363D; color: #8B949E; }"
+        )
+        self._scan_btn_style_scanning = (
+            "QPushButton { background-color: #30363D; color: #8B949E; border-radius: 4px; padding: 4px 10px; }"
+        )
+        self.scan_btn.setStyleSheet(self._scan_btn_style_normal)
+        self.scan_btn.clicked.connect(self.on_scan)
+        self.scan_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.scan_btn.setFixedHeight(28)
+        card_win_layout.addWidget(self.scan_btn)
+        top_cards.addWidget(card_win)
+        root.addLayout(top_cards)
+        sides_frame = self._card_frame()
+        sides_layout = QVBoxLayout(sides_frame)
+        sides_layout.setContentsMargins(6, 2, 6, 2)
+        sides_layout.setSpacing(2)
+        self.side_units = {}
+        for key, label in [("team_a", "A"), ("team_b", "B"), ("team_c", "C")]:
+            row = QVBoxLayout()
+            row.setSpacing(2)
+            head = QHBoxLayout()
+            side_lbl = self._label(label, muted=True, bold=True)
+            head.addWidget(side_lbl, 0, Qt.AlignLeft)
+            prob_lbl = self._label("—", muted=True)
+            head.addWidget(prob_lbl, 0, Qt.AlignLeft)
+            head.addStretch()
+            coin_lbl = self._label("Coin -", muted=True)
+            head.addWidget(coin_lbl, 0, Qt.AlignRight)
+            row.addLayout(head)
+            text = QTextEdit()
+            text.setReadOnly(True)
+            text.setFrameShape(QFrame.NoFrame)
+            text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            text.setStyleSheet(
+                "QTextEdit { background-color: #0D1117; color: #C9D1D9; border-radius: 4px; }"
+            )
+            mono = QFont("Cascadia Mono", 8)
+            text.setFont(mono)
+            fm = QFontMetrics(mono)
+            text.setFixedHeight(int(fm.lineSpacing() * 4 + 8))
+            row.addWidget(text)
+            sides_layout.addLayout(row)
+            self.side_units[key] = {"coin": coin_lbl, "prob": prob_lbl, "list": text}
+        root.addWidget(sides_frame)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setVisible(False)
+
+    def _check_ocr(self):
+        try:
+            _ = pytesseract.get_tesseract_version()
+        except Exception:
+            QMessageBox.warning(
+                self,
+                "OCR",
+                "Tesseract OCR not found.\nInstall Tesseract and set user_config.TESSERACT_CMD.",
+            )
+
+    def _set_status(self, text):
+        return
+
+    def _append_log(self, text, level=None):
+        color = "#C9D1D9"
+        if level == "bad":
+            color = "#F85149"
+        elif level == "warn":
+            color = "#D29922"
+        self.log_text.setTextColor(QColor(color))
+        self.log_text.append(text)
+        self.log_text.moveCursor(QTextCursor.End)
+        if len(self.log_text.toPlainText()) > 4000:
+            txt = self.log_text.toPlainText()
+            self.log_text.clear()
+            self.log_text.setText(txt[-3000:])
+
+    def on_scan(self):
+        if not self.detector:
+            return
+        self.scan_btn.setStyleSheet(self._scan_btn_style_scanning)
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.repaint()
+        QApplication.processEvents()
+        self._set_status("")
+        self.log_text.clear()
+        for key in self.side_units:
+            self.side_units[key]["coin"].setText("Coin -")
+            self.side_units[key]["list"].clear()
         try:
             results = self.detector.detect()
-            self.text.delete("1.0", "end")
-            self.render_results(results)
-            self.status_var.set("Done")
+            self._render_results(results)
+            self._set_status("")
         except Exception as e:
-            messagebox.showerror("Detection error", str(e))
-            self.status_var.set("Error")
+            QMessageBox.critical(self, "Scan", str(e))
+            self._set_status("")
         finally:
-            self.detect_btn.config(state="normal")
+            self.scan_btn.setStyleSheet(self._scan_btn_style_normal)
+            self.scan_btn.setEnabled(True)
+            self.scan_btn.repaint()
 
-    def render_results(self, results):
+    def _render_results(self, results):
         battle = results.get("_battle", {})
+        probs = {}
         if battle.get("available"):
-            self.write(
-                f"Predicted winner: {battle.get('best_team')} "
-                f"({battle.get('best_prob', 0.0):.1%})\n"
-            )
+            best_team = battle.get("best_team")
+            best_prob = battle.get("best_prob", 0.0)
+            probs = battle.get("team_probs", {}) or {}
+            label = {"team_a": "A", "team_b": "B", "team_c": "C"}.get(best_team, "?")
+            self.win_team_label.setText(label)
+            if best_team == "team_a":
+                self.win_team_label.setStyleSheet(f"color: {self.c_team_a.name()};")
+            elif best_team == "team_b":
+                self.win_team_label.setStyleSheet(f"color: {self.c_team_b.name()};")
+            elif best_team == "team_c":
+                self.win_team_label.setStyleSheet(f"color: {self.c_team_c.name()};")
+            else:
+                self.win_team_label.setStyleSheet("color: #C9D1D9;")
+            self.win_prob_label.setText(f"{_fmt_pct(best_prob)}")
+            if best_prob >= 0.999:
+                c = self.c_prob_gold
+            else:
+                t = 0.0
+                if best_prob <= 0.5:
+                    t = 0.0
+                elif best_prob >= 0.99:
+                    t = 1.0
+                else:
+                    t = (best_prob - 0.5) / (0.99 - 0.5)
+                c = _lerp_color(self.c_prob_hi, self.c_prob_lo, t)
+            self.win_prob_label.setStyleSheet(f"color: {c.name()};")
+            coins = results.get(best_team, {}).get("coins", None)
+            self.win_coin_label.setText(f"Coin {coins if coins is not None else '-'}")
         else:
-            self.write("Predicted winner: unknown\n")
-        self.write("-" * 50 + "\n")
-        if battle.get("available"):
-            probs = battle.get("team_probs", {})
-            self.write(f"team_a win prob: {probs.get('team_a', 0.0):.1%}\n")
-            self.write(f"team_b win prob: {probs.get('team_b', 0.0):.1%}\n")
-            self.write(f"team_c win prob: {probs.get('team_c', 0.0):.1%}\n")
-        else:
-            self.write("team_a win prob: n/a\n")
-            self.write("team_b win prob: n/a\n")
-            self.write("team_c win prob: n/a\n")
-        self.write("-" * 50 + "\n")
-        self.write("\n")
-
+            self.win_team_label.setText("?")
+            self.win_team_label.setStyleSheet("color: #8B949E;")
+            self.win_prob_label.setText("n/a")
+            self.win_coin_label.setText("Coin -")
         for team in ["team_a", "team_b", "team_c"]:
             r = results.get(team, {})
-            self.write(f"{team}\n")
-            self.write("-" * 50 + "\n")
-
-            if not r.get("found"):
-                self.text.insert("end", f"Not found: {r.get('reason', 'unknown')}\n\n", ("row_red",))
-                self.text.see("end")
+            side = self.side_units.get(team)
+            if not side:
                 continue
-
-            self.write(f"Coins: {r.get('coins')}\n")
-
+            side_prob = probs.get(team, None)
+            if side.get("prob") is not None:
+                side["prob"].setText(_fmt_pct(side_prob) if side_prob is not None else "—")
+            box = side["list"]
+            if not r.get("found"):
+                side["coin"].setText("Coin -")
+                box.clear()
+                box.append("none")
+                continue
+            coins = r.get("coins")
+            side["coin"].setText(f"Coin {coins if coins is not None else '-'}")
+            box.clear()
             units = r.get("units", [])
             if not units:
-                self.text.insert("end", "Units: none detected\n\n", ("row_red",))
-                self.text.see("end")
+                box.append("none")
                 continue
-
-            self.write("Units:\n")
             for i, u in enumerate(units, 1):
-                self.write(f"  {i}. ")
-                row_text = (
-                    f"{u['unit_name']}"
-                    f" | level={u['level']}"
-                    f" | match={u['score']}"
-                    f"\n"
-                )
-                if u["unit_name"] == "unknown":
-                    self.text.insert("end", row_text, ("row_red",))
-                    self.text.see("end")
-                elif u["score"] is not None and u["score"] < UNIT_WARN_THRESHOLD:
-                    self.text.insert("end", row_text, ("row_yellow",))
-                    self.text.see("end")
-                else:
-                    self.write(row_text)
-            self.write("\n")
+                name = u.get("unit_name")
+                level = u.get("level")
+                score = u.get("score")
+                score_txt = _fmt_float(score, 2) if score is not None else "n/a"
+                label = {"team_a": "A", "team_b": "B", "team_c": "C"}.get(team, team)
+                box.append(f"{label}{i} Lv{level}-{name} {score_txt}")
 
 
 def run_app(save_unlabeled=False):
-    root = tk.Tk()
-    app = App(root, save_unlabeled=save_unlabeled)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    win = MainWindow(save_unlabeled=save_unlabeled)
+    if not win.detector:
+        return
+    win.show()
+    win.raise_()
+    win.activateWindow()
+    app.exec()
 
 
 if __name__ == "__main__":
