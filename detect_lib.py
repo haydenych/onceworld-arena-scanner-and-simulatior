@@ -3,6 +3,7 @@ import re
 import csv
 import random
 import math
+import time
 from pathlib import Path
 
 import cv2
@@ -68,14 +69,14 @@ UNIT_WARN_THRESHOLD = 0.35
 
 CHECKPOINT_DIR = "checkpoints"
 CHECKPOINT_GLOB = "unit_resnet18_*.pt"
-ANCHOR_DEBUG_ALL_SCALES = False
+DEBUG = True
 UNLABELED_ICON_DIR = "dataset_enemy_icons"
 UNLABELED_ICON_PREFIX = "img"
 UNLABELED_ICON_DIGITS = 4
 BATTLE_MONSTERS_CSV = "monsters.csv"
-BATTLE_SIM_TRIALS = 8
-BATTLE_SIM_DELTA_TIME = 0.04
-BATTLE_SIM_DURATION = 18.0
+BATTLE_SIM_TRIALS = 100
+BATTLE_SIM_DELTA_TIME = 0.02
+BATTLE_SIM_DURATION = 40.0
 
 # Row/enemy/coin geometry is shared from detect_common.py
 
@@ -99,6 +100,14 @@ def _fmt_float(x, digits=3):
         return f"{float(x):.{int(digits)}f}"
     except Exception:
         return "n/a"
+
+
+def _debug_perf(label, start_ts):
+    if not DEBUG:
+        return
+    elapsed_ms = (time.time() - float(start_ts)) * 1000.0
+    pretty_label = str(label).replace(":total", " total")
+    print(f"[perf] {pretty_label}: {elapsed_ms:.2f} ms")
 
 
 def _lerp_color(c1, c2, t):
@@ -167,7 +176,7 @@ def match_template_multiscale(search_img, template_bgr, scales, threshold, debug
 
         res = cv2.matchTemplate(search_img, tpl, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
-        if ANCHOR_DEBUG_ALL_SCALES and debug_label is not None:
+        if DEBUG and debug_label is not None:
             tag = "PASS" if max_val >= threshold else "FAIL"
             print(f"[anchor-scale] {debug_label} scale={scale:.3f} score={max_val:.3f} {tag}")
 
@@ -477,6 +486,9 @@ class TorchUnitClassifier:
         self.model = model
         self.checkpoint_path = str(ckpt_path)
 
+        if DEBUG:
+            print(f"[unit-model] loaded checkpoint: {self.checkpoint_path}")
+
     def _find_latest_checkpoint(self, checkpoint_dir):
         root = Path(checkpoint_dir)
         if not root.exists():
@@ -580,11 +592,13 @@ class ScreenDetector:
         return base
 
     def _simulate_battle_probs(self, results):
+        t_sim_total = time.time()
         team_map = {"team_a": "A", "team_b": "B", "team_c": "C"}
         # Follow app_arena-style spawn setup.
         positions = {"A": (450.0, 450.0), "B": (550.0, 450.0), "C": (500.0, 500.0)}
         seed_entries = {"A": [], "B": [], "C": []}
         unknown_count = 0
+        t_seed_start = time.time()
 
         for team_key, team_letter in team_map.items():
             for u in results.get(team_key, {}).get("units", []):
@@ -601,9 +615,13 @@ class ScreenDetector:
 
         teams_with_known = sum(1 for t in ["A", "B", "C"] if len(seed_entries[t]) > 0)
         if teams_with_known < 2:
+            _debug_perf("battle_sim:seed_setup", t_seed_start)
+            _debug_perf("battle_sim:total", t_sim_total)
             return {"available": False, "reason": "not_enough_known_units", "unknown_count": unknown_count}
 
         wins = {"A": 0, "B": 0, "C": 0, "Draw": 0}
+        total_steps = 0
+        t_trials_start = time.time()
 
         for _ in range(BATTLE_SIM_TRIALS):
             teams = {"A": [], "B": [], "C": []}
@@ -644,12 +662,14 @@ class ScreenDetector:
             field = Field(teams)
             while not field.is_finished() and field.time_elapsed < BATTLE_SIM_DURATION:
                 field.step(BATTLE_SIM_DELTA_TIME)
+                total_steps += 1
 
             winner = field.get_winner()
             if winner in wins:
                 wins[winner] += 1
             else:
                 wins["Draw"] += 1
+        t_trials_end = time.time()
 
         total = max(1, sum(wins.values()))
         team_probs = {
@@ -658,6 +678,17 @@ class ScreenDetector:
             "team_c": wins["C"] / total,
         }
         best_team = max(team_probs, key=team_probs.get)
+
+        if DEBUG:
+            seed_ms = (t_trials_start - t_seed_start) * 1000.0
+            trials_ms = (t_trials_end - t_trials_start) * 1000.0
+            avg_steps = total_steps / max(1, BATTLE_SIM_TRIALS)
+            print(
+                f"[perf] battle_sim: seed={seed_ms:.2f} ms "
+                f"trials={trials_ms:.2f} ms "
+                f"steps={total_steps} avg_steps/trial={avg_steps:.1f}"
+            )
+        _debug_perf("battle_sim:total", t_sim_total)
 
         return {
             "available": True,
@@ -669,12 +700,17 @@ class ScreenDetector:
         }
 
     def detect(self):
+        t_detect_total = time.time()
+        t_capture = time.time()
         screen_bgr = grab_screen_bgr()
+        _debug_perf("capture_screen", t_capture)
 
         results = {}
         run_anchor_scale = self.cached_anchor_scale
 
         for team_name in ["team_a", "team_b", "team_c"]:
+            t_team_total = time.time()
+            t_anchor = time.time()
             if run_anchor_scale is None:
                 anchor_match = match_template_multiscale(
                     screen_bgr,
@@ -703,12 +739,14 @@ class ScreenDetector:
                         ANCHOR_THRESHOLD,
                         debug_label=f"{team_name}:fallback",
                     )
+            _debug_perf(f"{team_name}:anchor_search", t_anchor)
 
             if anchor_match is None:
                 results[team_name] = {
                     "found": False,
                     "reason": "anchor not found"
                 }
+                _debug_perf(f"{team_name}:total", t_team_total)
                 continue
 
             run_anchor_scale = float(anchor_match["scale"])
@@ -717,41 +755,57 @@ class ScreenDetector:
                 f"[anchor] {team_name}: score={anchor_match['score']:.3f} "
                 f"scale={anchor_match['scale']:.3f}"
             )
+            t_row_detect = time.time()
             team_result = self._detect_team_row(screen_bgr, row_box, team_name)
+            _debug_perf(f"{team_name}:row_detect", t_row_detect)
             team_result["found"] = True
             team_result["anchor_score"] = round(anchor_match["score"], 3)
             team_result["anchor_scale"] = round(anchor_match["scale"], 3)
             team_result["row_box"] = row_box
             results[team_name] = team_result
+            _debug_perf(f"{team_name}:total", t_team_total)
 
         if run_anchor_scale is not None:
             self.cached_anchor_scale = run_anchor_scale
 
         results["_battle"] = self._simulate_battle_probs(results)
+        _debug_perf("detect_total", t_detect_total)
         return results
 
     def _detect_team_row(self, screen_bgr, row_box, team_name):
+        t_row_total = time.time()
         row_img = crop(screen_bgr, row_box)
 
         # Coin zone
+        t_coin_ocr = time.time()
         coin_box_abs = sub_box(row_box, COIN_ZONE)
         coin_img = crop(screen_bgr, coin_box_abs)
         coin_value, coin_raw_text = read_coin_text(coin_img)
+        coin_ocr_ms = (time.time() - t_coin_ocr) * 1000.0
 
+        t_icon_detect = time.time()
         icon_boxes = detect_enemy_icon_boxes(row_img, row_box)
+        icon_detect_ms = (time.time() - t_icon_detect) * 1000.0
         units = []
+        unit_ml_ms = 0.0
+        level_ocr_ms = 0.0
+        save_icon_ms = 0.0
 
         for i, icon_box in enumerate(icon_boxes, start=1):
             icon_box = clamp_box(icon_box, screen_bgr.shape[1], screen_bgr.shape[0])
             icon_img = crop(screen_bgr, icon_box)
 
             if self.save_unlabeled:
+                t_save_icon = time.time()
                 unlabeled_name = f"{UNLABELED_ICON_PREFIX}{self.next_unlabeled_idx:0{UNLABELED_ICON_DIGITS}d}.png"
                 unlabeled_path = self.unlabeled_icon_dir / unlabeled_name
                 if cv2.imwrite(str(unlabeled_path), icon_img):
                     self.next_unlabeled_idx += 1
+                save_icon_ms += (time.time() - t_save_icon) * 1000.0
 
+            t_unit_ml = time.time()
             pred = self.unit_classifier.predict(icon_img, top_k=5)
+            unit_ml_ms += (time.time() - t_unit_ml) * 1000.0
             if pred is None:
                 best_name = None
                 best_score = -1.0
@@ -779,7 +833,9 @@ class ScreenDetector:
             )
             level_box = clamp_box(level_box, screen_bgr.shape[1], screen_bgr.shape[0])
             level_img = crop(screen_bgr, level_box)
+            t_level_ocr = time.time()
             level_value, level_raw_text = read_level_text(level_img)
+            level_ocr_ms += (time.time() - t_level_ocr) * 1000.0
 
             if (
                 best_name is None
@@ -799,6 +855,18 @@ class ScreenDetector:
                 "level_raw_text": level_raw_text,
             })
 
+        if DEBUG:
+            total_ms = (time.time() - t_row_total) * 1000.0
+            print(
+                f"[perf] {team_name}: coin_ocr={coin_ocr_ms:.2f} ms "
+                f"icon_detect={icon_detect_ms:.2f} ms "
+                f"unit_ml={unit_ml_ms:.2f} ms "
+                f"level_ocr={level_ocr_ms:.2f} ms "
+                f"save_icons={save_icon_ms:.2f} ms "
+                f"slots={len(icon_boxes)} "
+                f"total={total_ms:.2f} ms"
+            )
+
         return {
             "coins": coin_value,
             "coin_raw_text": coin_raw_text,
@@ -809,8 +877,13 @@ class ScreenDetector:
 class MainWindow(QMainWindow):
     def __init__(self, save_unlabeled=False):
         super().__init__()
+        self._base_window_width = 400
+        self._base_window_height = 400
+        self._font_targets = []
+        self._enemy_text_boxes = []
         self.setWindowTitle("OnceWorld Arena")
-        self.setFixedSize(316, 368)
+        self.setMinimumSize(self._base_window_width, self._base_window_height)
+        self.resize(self._base_window_width, self._base_window_height)
         self._set_app_icon()
         self.detector = None
         try:
@@ -822,6 +895,7 @@ class MainWindow(QMainWindow):
         self._check_ocr()
         self._init_palette()
         self._build_ui()
+        self._apply_scaled_fonts()
         self._set_status("")
 
     def _set_app_icon(self):
@@ -887,17 +961,65 @@ class MainWindow(QMainWindow):
 
     def _label(self, text, muted=False, bold=False, large=False):
         lbl = QLabel(text)
-        font = QFont("Segoe UI", 8)
+        base_size = 14 if large else 8
+        font = QFont("Segoe UI", base_size)
         if bold:
             font.setWeight(QFont.DemiBold)
-        if large:
-            font.setPointSize(14)
         lbl.setFont(font)
+        if large:
+            self._register_font_target(lbl, base_size, min_pt=10, max_pt=24)
+        else:
+            self._register_font_target(lbl, base_size, min_pt=7, max_pt=14)
         if muted:
             lbl.setStyleSheet("color: #8B949E;")
         else:
             lbl.setStyleSheet("color: #C9D1D9;")
         return lbl
+
+    def _register_font_target(self, widget, base_pt, min_pt=7, max_pt=None):
+        self._font_targets.append({
+            "widget": widget,
+            "base": float(base_pt),
+            "min": int(min_pt) if min_pt is not None else None,
+            "max": int(max_pt) if max_pt is not None else None,
+        })
+
+    def _font_scale_factor(self):
+        w_scale = self.width() / float(self._base_window_width)
+        h_scale = self.height() / float(self._base_window_height)
+        scale = min(w_scale, h_scale)
+        return max(0.85, min(1.8, scale))
+
+    def _apply_scaled_fonts(self):
+        if not self._font_targets:
+            return
+        scale = self._font_scale_factor()
+        for spec in self._font_targets:
+            widget = spec["widget"]
+            if widget is None:
+                continue
+            font = widget.font()
+            point_size = int(round(spec["base"] * scale))
+            if spec["min"] is not None:
+                point_size = max(spec["min"], point_size)
+            if spec["max"] is not None:
+                point_size = min(spec["max"], point_size)
+            point_size = max(1, point_size)
+            if font.pointSize() != point_size:
+                font.setPointSize(point_size)
+                widget.setFont(font)
+
+        for text in self._enemy_text_boxes:
+            fm = QFontMetrics(text.font())
+            text.setMinimumHeight(int(fm.lineSpacing() * 4 + 8))
+
+        if hasattr(self, "scan_btn"):
+            btn_fm = QFontMetrics(self.scan_btn.font())
+            self.scan_btn.setMinimumHeight(max(28, int(btn_fm.height() + 12)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_scaled_fonts()
 
     def _build_ui(self):
         central = QWidget()
@@ -922,6 +1044,7 @@ class MainWindow(QMainWindow):
         prob_font = QFont("Segoe UI", 10)
         prob_font.setWeight(QFont.DemiBold)
         self.win_prob_label.setFont(prob_font)
+        self._register_font_target(self.win_prob_label, 10, min_pt=8, max_pt=18)
         self.win_prob_label.setStyleSheet("color: #FACC15;")
         win_row.addWidget(self.win_prob_label, 0, Qt.AlignLeft)
         self.win_coin_label = self._label("—", muted=True, bold=True)
@@ -929,6 +1052,10 @@ class MainWindow(QMainWindow):
         win_row.addStretch()
         card_win_layout.addLayout(win_row)
         self.scan_btn = QPushButton("Scan")
+        scan_font = QFont("Segoe UI", 8)
+        scan_font.setWeight(QFont.DemiBold)
+        self.scan_btn.setFont(scan_font)
+        self._register_font_target(self.scan_btn, 8, min_pt=7, max_pt=14)
         self.scan_btn.setCursor(Qt.PointingHandCursor)
         self._scan_btn_style_normal = (
             "QPushButton { background-color: #238636; color: #FFFFFF; border-radius: 4px; padding: 4px 10px; }"
@@ -940,8 +1067,8 @@ class MainWindow(QMainWindow):
         )
         self.scan_btn.setStyleSheet(self._scan_btn_style_normal)
         self.scan_btn.clicked.connect(self.on_scan)
-        self.scan_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.scan_btn.setFixedHeight(28)
+        self.scan_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.scan_btn.setMinimumHeight(28)
         card_win_layout.addWidget(self.scan_btn)
         top_cards.addWidget(card_win)
         root.addLayout(top_cards)
@@ -972,12 +1099,15 @@ class MainWindow(QMainWindow):
             )
             mono = QFont("Cascadia Mono", 8)
             text.setFont(mono)
+            self._register_font_target(text, 8, min_pt=7, max_pt=14)
+            self._enemy_text_boxes.append(text)
             fm = QFontMetrics(mono)
-            text.setFixedHeight(int(fm.lineSpacing() * 4 + 8))
-            row.addWidget(text)
-            sides_layout.addLayout(row)
+            text.setMinimumHeight(int(fm.lineSpacing() * 4 + 8))
+            text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            row.addWidget(text, 1)
+            sides_layout.addLayout(row, 1)
             self.side_units[key] = {"coin": coin_lbl, "prob": prob_lbl, "list": text}
-        root.addWidget(sides_frame)
+        root.addWidget(sides_frame, 1)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setVisible(False)
@@ -1097,7 +1227,19 @@ class MainWindow(QMainWindow):
                 score = u.get("score")
                 score_txt = _fmt_float(score, 2) if score is not None else "n/a"
                 label = {"team_a": "A", "team_b": "B", "team_c": "C"}.get(team, team)
-                box.append(f"{label}{i} Lv{level}-{name} {score_txt}")
+                row_prefix = f"{label}{i} Lv{level}-{name} "
+                if name == "unknown":
+                    box.setTextColor(self.c_bad)
+                    box.insertPlainText(f"{row_prefix}{score_txt} (low confidence)\n")
+                elif score is not None and score < UNIT_WARN_THRESHOLD:
+                    box.setTextColor(self.c_text)
+                    box.insertPlainText(row_prefix)
+                    box.setTextColor(self.c_warn)
+                    box.insertPlainText(f"{score_txt} (low confidence)\n")
+                else:
+                    box.setTextColor(self.c_text)
+                    box.insertPlainText(f"{row_prefix}{score_txt}\n")
+                box.setTextColor(self.c_text)
 
 
 def run_app(save_unlabeled=False):
