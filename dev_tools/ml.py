@@ -1,6 +1,7 @@
 import argparse
 import random
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models
 from torchvision.transforms import functional as TF
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from onceworld.core.modeling import build_resnet18_classifier
 
 
 def center_crop_square(img: Image.Image):
@@ -352,9 +359,7 @@ def evaluate(model, loader, criterion, device):
 
 
 def build_model(num_classes):
-    model = models.resnet18(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    return model
+    return build_resnet18_classifier(num_classes, models, nn)
 
 
 def parse_args():

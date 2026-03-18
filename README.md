@@ -28,7 +28,12 @@ Use this section for dataset collection, labeling, and training workflows.
 
 ### Project layout
 - Runtime app:
-- `detect.py`, `detect_dev.py`, `detect_lib.py`, `detect_common.py`, `user_config.py`
+- Launchers: `detect.py`, `detect_dev.py`
+- App/UI: `onceworld/app/entry.py`, `onceworld/app/window.py`
+- Core runtime: `onceworld/core/detector.py`, `onceworld/core/vision.py`, `onceworld/core/ocr.py`, `onceworld/core/classifier.py`, `onceworld/core/sim.py`, `onceworld/core/perf.py`
+- Core ML/data helpers: `onceworld/core/data_collection.py`, `onceworld/core/modeling.py`
+- Config: `onceworld/config/runtime.py`, `onceworld/config/geometry.py`, `user_config.py`
+- Runtime data: `onceworld/data/monsters.csv`, `onceworld/data/attack_range.json`
 - Dev tools:
 - `dev_tools/screenshot.py`
 - `dev_tools/ml_data.py`
@@ -43,7 +48,7 @@ Use this section for dataset collection, labeling, and training workflows.
 4. Run detector with `python detect.py` (or `python detect_dev.py` for dev mode).
 
 ### Shared internals
-- `detect_common.py` keeps shared detector geometry/constants to reduce drift between runtime and dev collection code.
+- `onceworld/config/geometry.py` is the canonical shared detector geometry/constants module.
 - `user_config.py` is intentionally minimal and end-user focused.
 - `ANCHOR_SCALES` and `ANCHOR_THRESHOLD` in `user_config.py` are used by both runtime detection and `dev_tools/ml_data.py`.
 

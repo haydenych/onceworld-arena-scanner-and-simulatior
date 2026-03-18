@@ -1,7 +1,8 @@
 import json
 import math
-import os
 import random
+
+from onceworld.paths import ATTACK_RANGE_JSON
 
 
 _ATTACK_RANGE_CACHE = None
@@ -12,13 +13,13 @@ def _load_attack_ranges():
     if _ATTACK_RANGE_CACHE is not None:
         return _ATTACK_RANGE_CACHE
 
-    path = os.path.join(os.path.dirname(__file__), "attack_range.json")
-    if not os.path.exists(path):
+    path = ATTACK_RANGE_JSON
+    if not path.exists():
         _ATTACK_RANGE_CACHE = {}
         return _ATTACK_RANGE_CACHE
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         _ATTACK_RANGE_CACHE = {str(k): float(v) for k, v in data.items()}
     except Exception:

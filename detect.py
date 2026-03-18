@@ -4,8 +4,8 @@ Run this file for normal detection.
 Edit settings in user_config.py only.
 """
 
-from detect_lib import run_app
+from onceworld.app.entry import run
 
 
 if __name__ == "__main__":
-    run_app(save_unlabeled=False)
+    run(dev=False)
