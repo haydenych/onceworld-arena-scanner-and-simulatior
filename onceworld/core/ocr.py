@@ -7,8 +7,11 @@ import cv2
 import pytesseract
 
 import user_config
-from onceworld.config.runtime import TESS_CONFIG_COIN, TESS_CONFIG_LEVEL
-from onceworld.paths import TESSERACT_EXE_FALLBACK
+from onceworld.config.runtime import (
+    TESS_CONFIG_COIN,
+    TESS_CONFIG_LEVEL,
+    TESSERACT_EXE_FALLBACK,
+)
 
 _TESS_CONFIGURED = False
 

@@ -50,7 +50,7 @@ Main knobs:
 - Synthetic val: same as synthetic train but deterministic (`small_px` midpoint, zero shift).
 - Real split uses `StratifiedShuffleSplit` for classes with at least two samples; singleton classes are assigned to train.
 - Training mixes synthetic and real using `--real-mix-ratio-train` and `--real-mix-ratio-val`.
-W
+
 ### Typical workflow
 1. Collect icons: `python dev_tools/ml_data.py` for arena icons or `python dev_tools/screenshot.py` for monster dex synthetic icons
 2. Run `dev_tools/quick_prelabelling.ipynb` for fast labels to expand dataset and check for correctness

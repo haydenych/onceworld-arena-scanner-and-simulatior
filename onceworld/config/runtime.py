@@ -1,18 +1,23 @@
 """Runtime configuration for detection, OCR, model, and simulation."""
 
+from pathlib import Path
+
 import numpy as np
 
 import user_config
-from onceworld.paths import (
-    ANCHOR_DIR as ANCHOR_DIR_PATH,
-    ASSET_DIR as ASSET_DIR_PATH,
-    CHECKPOINT_DIR as CHECKPOINT_DIR_PATH,
-    MONSTERS_CSV,
-    UNLABELED_ICON_DIR as UNLABELED_ICON_DIR_PATH,
-)
 
-ASSET_DIR = ASSET_DIR_PATH
-ANCHOR_DIR = ANCHOR_DIR_PATH
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = PACKAGE_ROOT.parent
+DATA_DIR = PACKAGE_ROOT / "data"
+
+ASSET_DIR = PROJECT_ROOT / "assets"
+ANCHOR_DIR = ASSET_DIR / "anchors"
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+UNLABELED_ICON_DIR = PROJECT_ROOT / "dataset_enemy_icons"
+
+ATTACK_RANGE_JSON = DATA_DIR / "attack_range.json"
+MONSTERS_CSV = DATA_DIR / "monsters.csv"
+TESSERACT_EXE_FALLBACK = PROJECT_ROOT / "Tesseract-OCR" / "tesseract.exe"
 
 ANCHOR_SCALES = np.asarray(user_config.ANCHOR_SCALES, dtype=float)
 ANCHOR_THRESHOLD = float(user_config.ANCHOR_THRESHOLD)
@@ -21,10 +26,8 @@ UNIT_THRESHOLD = 0.20
 UNIT_MARGIN_THRESHOLD = 0.02
 UNIT_WARN_THRESHOLD = 0.35
 
-CHECKPOINT_DIR = CHECKPOINT_DIR_PATH
 CHECKPOINT_GLOB = "unit_resnet18_*.pt"
 
-UNLABELED_ICON_DIR = UNLABELED_ICON_DIR_PATH
 UNLABELED_ICON_PREFIX = "img"
 UNLABELED_ICON_DIGITS = 4
 

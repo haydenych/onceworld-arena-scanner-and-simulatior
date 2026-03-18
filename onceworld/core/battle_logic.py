@@ -2,7 +2,7 @@ import json
 import math
 import random
 
-from onceworld.paths import ATTACK_RANGE_JSON
+from onceworld.config.runtime import ATTACK_RANGE_JSON
 
 
 _ATTACK_RANGE_CACHE = None
