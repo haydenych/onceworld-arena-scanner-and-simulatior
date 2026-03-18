@@ -3,8 +3,8 @@
 Uses the same runtime config as detect.py, but also saves unlabeled icons.
 """
 
-from detect_lib import run_app
+from onceworld.app.entry import run
 
 
 if __name__ == "__main__":
-    run_app(save_unlabeled=True)
+    run(dev=True)

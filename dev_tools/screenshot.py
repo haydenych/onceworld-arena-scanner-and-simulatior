@@ -18,6 +18,12 @@ OCR_DEBUG_DIR = OUT_DIR / "_ocr_debug"
 FILE_PREFIX = "img"
 FILE_DIGITS = 4
 TESSERACT_EXE = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+REMINDER_TEXT = (
+    "Reminder: Set emulator to full screen before taking screenshots.\n"
+    "Screenshot 1: Captured pets, Screenshot 2: Non-captured."
+)
+SHOT_1_NAME = "Screenshot 1: Captured pets"
+SHOT_2_NAME = "Screenshot 2: Non-captured"
 
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
 
@@ -197,9 +203,9 @@ class App:
         top = ttk.Frame(root, padding=10)
         top.pack(fill="x")
 
-        self.capture1_btn = ttk.Button(top, text="Screenshot 1 (F1)", command=self.on_capture_1)
+        self.capture1_btn = ttk.Button(top, text="Screenshot 1: Captured pets (F1)", command=self.on_capture_1)
         self.capture1_btn.pack(side="left")
-        self.capture2_btn = ttk.Button(top, text="Screenshot 2 (F2)", command=self.on_capture_2)
+        self.capture2_btn = ttk.Button(top, text="Screenshot 2: Non-captured (F2)", command=self.on_capture_2)
         self.capture2_btn.pack(side="left", padx=8)
 
         self.root.bind("<F1>", lambda _e: self.on_capture_1())
@@ -208,9 +214,13 @@ class App:
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
 
+        reminder = ttk.Label(root, text=REMINDER_TEXT, justify="left", padding=(10, 0, 10, 0))
+        reminder.pack(fill="x")
+
         self.text = tk.Text(root, wrap="word", font=("Consolas", 11))
         self.text.pack(fill="both", expand=True, padx=10, pady=10)
-        self._write("Ready.\n")
+        self._write(REMINDER_TEXT + "\n")
+        self._write("Ready.\n\n")
 
     def _write(self, s):
         self.text.insert("end", s)
@@ -237,10 +247,10 @@ class App:
             self.capture2_btn.config(state="normal")
 
     def on_capture_1(self):
-        self._capture_with_rect(PORTRAIT_RECT_1, "Screenshot 1")
+        self._capture_with_rect(PORTRAIT_RECT_1, SHOT_1_NAME)
 
     def on_capture_2(self):
-        self._capture_with_rect(PORTRAIT_RECT_2, "Screenshot 2")
+        self._capture_with_rect(PORTRAIT_RECT_2, SHOT_2_NAME)
 
 
 def main():
