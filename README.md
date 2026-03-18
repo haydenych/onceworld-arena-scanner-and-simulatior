@@ -4,11 +4,9 @@ Vibe-coding project, just for fun. No guaranteed maintenance.
 
 ## Demo
 
-<video src="assets/demo.mp4" controls muted playsinline width="960">
-  Your browser does not support the video tag.
-</video>
+![Demo](assets/demo.gif)
 
-If inline playback does not render in your GitHub client, use [Watch demo](assets/demo.mp4).
+If inline playback does not render in your GitHub client, use [Watch demo](assets/demo.gif).
 
 ## For users
 
