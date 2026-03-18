@@ -17,7 +17,7 @@ from onceworld.config.runtime import (
     UNLABELED_ICON_DIR,
     UNLABELED_ICON_PREFIX,
 )
-from onceworld.core.classifier import TorchUnitClassifier
+from onceworld.core.classifier import UnitClassifier
 from onceworld.core.ocr import read_coin_text, read_level_text
 from onceworld.core.perf import debug_perf, is_debug
 from onceworld.core.sim import BattleSimulator
@@ -47,7 +47,7 @@ class ScreenDetector:
                 f"Expected files in {ANCHOR_DIR}"
             )
 
-        self.unit_classifier = TorchUnitClassifier(CHECKPOINT_DIR)
+        self.unit_classifier = UnitClassifier(CHECKPOINT_DIR)
         self.simulator = BattleSimulator()
         self.cached_anchor_scale = None
         self.save_unlabeled = bool(save_unlabeled)
@@ -88,10 +88,11 @@ class ScreenDetector:
                     debug_label=f"{team_name}:cached",
                 )
                 if anchor_match is None:
-                    print(
-                        f"[anchor] {team_name}: cached scale {run_anchor_scale:.3f} failed, "
-                        "rerunning full search"
-                    )
+                    if is_debug():
+                        print(
+                            f"[anchor] {team_name}: cached scale {run_anchor_scale:.3f} failed, "
+                            "rerunning full search"
+                        )
                     anchor_match = match_template_multiscale(
                         screen_bgr,
                         self.anchor_templates[team_name],
@@ -108,10 +109,11 @@ class ScreenDetector:
 
             run_anchor_scale = float(anchor_match["scale"])
             row_box = make_row_box_from_anchor(anchor_match["box"], screen_bgr)
-            print(
-                f"[anchor] {team_name}: score={anchor_match['score']:.3f} "
-                f"scale={anchor_match['scale']:.3f}"
-            )
+            if is_debug():
+                print(
+                    f"[anchor] {team_name}: score={anchor_match['score']:.3f} "
+                    f"scale={anchor_match['scale']:.3f}"
+                )
             t_row_detect = time.time()
             team_result = self._detect_team_row(screen_bgr, row_box, team_name)
             debug_perf(f"{team_name}:row_detect", t_row_detect)
@@ -226,4 +228,3 @@ class ScreenDetector:
             "coin_raw_text": coin_raw_text,
             "units": units,
         }
-

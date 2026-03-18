@@ -2,30 +2,34 @@ import argparse
 import random
 import re
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
+from sklearn.model_selection import StratifiedShuffleSplit
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models
-from torchvision.transforms import functional as TF
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms import functional as F
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from onceworld.core.icon_preprocess import (
+    NORMALIZE_MEAN,
+    NORMALIZE_STD,
+    build_real_eval_preprocess,
+    build_tensor_normalize,
+    shift_lowres_with_padding,
+)
 from onceworld.core.modeling import build_resnet18_classifier
 
 
-def center_crop_square(img: Image.Image):
-    rgb = img.convert("RGB")
-    w, h = rgb.size
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    return rgb.crop((left, top, left + side, top + side))
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 class SyntheticIconDataset(Dataset):
@@ -33,202 +37,123 @@ class SyntheticIconDataset(Dataset):
         self,
         items,
         image_size=128,
-        samples_per_class=128,
-        template_size_px=150,
+        samples_per_class=10,
         small_min_px=50,
         small_max_px=85,
-        max_shift_px=4,
-        seed=1337,
+        max_shift_px=2,
         train=True,
     ):
         self.items = items
         self.image_size = int(image_size)
         self.samples_per_class = int(samples_per_class)
-        self.template_size_px = int(template_size_px)
         self.small_min_px = int(small_min_px)
         self.small_max_px = int(small_max_px)
         self.max_shift_px = int(max_shift_px)
-        self.seed = int(seed)
         self.train = bool(train)
-        self.epoch = 0
 
-        if self.template_size_px < self.image_size:
-            raise RuntimeError("--template-size-px must be >= --image-size")
-        if not (8 <= self.small_min_px <= self.small_max_px <= self.template_size_px):
-            raise RuntimeError(
-                "--small-min-px/--small-max-px must satisfy: 8 <= min <= max <= template-size-px"
-            )
+        if not self.items:
+            raise RuntimeError("SyntheticIconDataset needs at least one template.")
+        if self.image_size <= 0:
+            raise RuntimeError("--image-size must be > 0")
+        if not (8 <= self.small_min_px <= self.small_max_px):
+            raise RuntimeError("--small-min-px/--small-max-px must satisfy 8 <= min <= max.")
+        if self.max_shift_px < 0:
+            raise RuntimeError("--max-shift-px must be >= 0")
 
-        self.base_images = []
-        for item in self.items:
-            img = Image.open(item["path"]).convert("RGB")
-            self.base_images.append(center_crop_square(img))
-
-    def set_epoch(self, epoch):
-        self.epoch = int(epoch)
+        self.mid_small_px = (self.small_min_px + self.small_max_px) // 2
+        self.to_tensor = build_tensor_normalize(NORMALIZE_MEAN, NORMALIZE_STD)
+        self.base_images = [Image.open(item["path"]).convert("RGB") for item in self.items]
 
     def __len__(self):
         return len(self.items) * self.samples_per_class
 
-    def _rng(self, index):
-        salt = 1000003 if self.train else 2000003
-        return random.Random(self.seed + self.epoch * salt + index * 9176)
-
-    def _augment(self, img, rng):
-        if self.train:
-            small = rng.randint(self.small_min_px, self.small_max_px)
-        else:
-            small = (self.small_min_px + self.small_max_px) // 2
-
-        down = img.resize((small, small), resample=Image.NEAREST)
-        up = down.resize((self.template_size_px, self.template_size_px), resample=Image.NEAREST)
-
-        max_off = self.template_size_px - self.image_size
-        center_off = max_off // 2
-
-        if self.train:
-            x_jitter = rng.randint(-self.max_shift_px, self.max_shift_px)
-            y_jitter = rng.randint(-self.max_shift_px, self.max_shift_px)
-        else:
-            x_jitter = 0
-            y_jitter = 0
-
-        x0 = max(0, min(max_off, center_off + x_jitter))
-        y0 = max(0, min(max_off, center_off + y_jitter))
-        return up.crop((x0, y0, x0 + self.image_size, y0 + self.image_size))
-
     def __getitem__(self, index):
-        class_idx = index % len(self.items)
-        rng = self._rng(index)
-
+        class_idx = int(index % len(self.base_images))
         img = self.base_images[class_idx]
-        aug = self._augment(img, rng)
 
-        x = TF.to_tensor(aug)
-        x = (x - 0.5) / 0.5
+        if self.train:
+            small_px = random.randint(self.small_min_px, self.small_max_px)
+            dx = random.randint(-self.max_shift_px, self.max_shift_px)
+            dy = random.randint(-self.max_shift_px, self.max_shift_px)
+        else:
+            small_px = self.mid_small_px
+            dx = 0
+            dy = 0
+
+        low = F.resize(img, [small_px, small_px], interpolation=InterpolationMode.NEAREST)
+        low_shifted = shift_lowres_with_padding(
+            low,
+            dx=dx,
+            dy=dy,
+            pad_px=self.max_shift_px,
+        )
+        up = F.resize(
+            low_shifted,
+            [self.image_size, self.image_size],
+            interpolation=InterpolationMode.NEAREST,
+        )
+        x = self.to_tensor(up)
         y = class_idx
         return x, y
 
 
 class RealIconDataset(Dataset):
-    def __init__(
-        self,
-        samples,
-        image_size=128,
-        template_size_px=150,
-        max_shift_px=4,
-        seed=1337,
-        train=True,
-    ):
+    def __init__(self, samples, image_size=128):
         self.samples = samples
-        self.image_size = int(image_size)
-        self.template_size_px = int(template_size_px)
-        self.max_shift_px = int(max_shift_px)
-        self.seed = int(seed)
-        self.train = bool(train)
-        self.epoch = 0
-
-        if self.template_size_px < self.image_size:
-            raise RuntimeError("--template-size-px must be >= --image-size")
-
-        self.base_images = []
-        self.labels = []
-        for s in self.samples:
-            img = Image.open(s["path"]).convert("RGB")
-            self.base_images.append(center_crop_square(img))
-            self.labels.append(int(s["class_idx"]))
-
-    def set_epoch(self, epoch):
-        self.epoch = int(epoch)
+        self.preprocess = build_real_eval_preprocess(
+            image_size=int(image_size),
+            mean=NORMALIZE_MEAN,
+            std=NORMALIZE_STD,
+        )
+        self.images = [Image.open(s["path"]).convert("RGB") for s in self.samples]
+        self.labels = [int(s["class_idx"]) for s in self.samples]
 
     def __len__(self):
         return len(self.labels)
 
-    def _rng(self, index):
-        salt = 3000007 if self.train else 4000007
-        return random.Random(self.seed + self.epoch * salt + index * 7919)
-
-    def _augment(self, img, rng):
-        up = img.resize((self.template_size_px, self.template_size_px), resample=Image.NEAREST)
-
-        max_off = self.template_size_px - self.image_size
-        center_off = max_off // 2
-
-        if self.train:
-            x_jitter = rng.randint(-self.max_shift_px, self.max_shift_px)
-            y_jitter = rng.randint(-self.max_shift_px, self.max_shift_px)
-        else:
-            x_jitter = 0
-            y_jitter = 0
-
-        x0 = max(0, min(max_off, center_off + x_jitter))
-        y0 = max(0, min(max_off, center_off + y_jitter))
-        return up.crop((x0, y0, x0 + self.image_size, y0 + self.image_size))
-
     def __getitem__(self, index):
-        rng = self._rng(index)
-        img = self.base_images[index]
-        aug = self._augment(img, rng)
-
-        x = TF.to_tensor(aug)
-        x = (x - 0.5) / 0.5
-        y = self.labels[index]
-        return x, y
+        return self.preprocess(self.images[index]), self.labels[index]
 
 
 class MixedDataset(Dataset):
-    def __init__(self, synthetic_ds=None, real_ds=None, real_ratio=0.5, seed=1337, train=True):
+    def __init__(self, synthetic_ds=None, real_ds=None, real_ratio=0.5, train=True):
         self.synthetic_ds = synthetic_ds
         self.real_ds = real_ds
         self.real_ratio = float(real_ratio)
-        self.seed = int(seed)
         self.train = bool(train)
-        self.epoch = 0
 
-        self.syn_len = len(synthetic_ds) if synthetic_ds is not None else 0
-        self.real_len = len(real_ds) if real_ds is not None else 0
-
+        self.syn_len = len(self.synthetic_ds) if self.synthetic_ds is not None else 0
+        self.real_len = len(self.real_ds) if self.real_ds is not None else 0
         if self.syn_len == 0 and self.real_len == 0:
             raise RuntimeError("MixedDataset needs at least one non-empty dataset.")
-
-        if self.syn_len > 0 and self.real_len > 0:
-            self.length = max(self.syn_len, self.real_len)
-        else:
-            self.length = self.syn_len if self.syn_len > 0 else self.real_len
-
-    def set_epoch(self, epoch):
-        self.epoch = int(epoch)
-        if self.synthetic_ds is not None and hasattr(self.synthetic_ds, "set_epoch"):
-            self.synthetic_ds.set_epoch(epoch)
-        if self.real_ds is not None and hasattr(self.real_ds, "set_epoch"):
-            self.real_ds.set_epoch(epoch)
+        self.length = max(self.syn_len, self.real_len)
 
     def __len__(self):
         return self.length
 
-    def _rng(self, index):
-        salt = 5000011 if self.train else 6000011
-        return random.Random(self.seed + self.epoch * salt + index * 6151)
+    def _use_real(self, index):
+        if self.real_len == 0:
+            return False
+        if self.syn_len == 0:
+            return True
+        if self.train:
+            return random.random() < self.real_ratio
+        cutoff = int(round(1000 * self.real_ratio))
+        return (index % 1000) < cutoff
 
     def __getitem__(self, index):
-        if self.syn_len == 0:
-            return self.real_ds[index % self.real_len]
-        if self.real_len == 0:
-            return self.synthetic_ds[index % self.syn_len]
-
-        use_real = self._rng(index).random() < self.real_ratio
-        if use_real:
+        if self._use_real(index):
             return self.real_ds[index % self.real_len]
         return self.synthetic_ds[index % self.syn_len]
 
 
 def scan_templates(units_dir: Path):
-    exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-    files = [p for p in sorted(units_dir.iterdir()) if p.is_file() and p.suffix.lower() in exts]
-    items = []
-    for p in files:
-        items.append({"name": p.stem, "path": p})
-    return items
+    files = [
+        p
+        for p in sorted(units_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    ]
+    return [{"name": p.stem, "path": p} for p in files]
 
 
 def parse_labeled_class_name(stem: str, class_to_idx):
@@ -247,8 +172,11 @@ def parse_labeled_class_name(stem: str, class_to_idx):
 
 
 def scan_real_labeled(real_dir: Path, class_to_idx):
-    exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-    files = [p for p in sorted(real_dir.iterdir()) if p.is_file() and p.suffix.lower() in exts]
+    files = [
+        p
+        for p in sorted(real_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    ]
 
     samples = []
     skipped = 0
@@ -257,19 +185,17 @@ def scan_real_labeled(real_dir: Path, class_to_idx):
         if cls is None:
             skipped += 1
             continue
-        samples.append({
-            "path": p,
-            "class_idx": int(class_to_idx[cls]),
-            "class_name": cls,
-        })
-
+        samples.append(
+            {
+                "path": p,
+                "class_idx": int(class_to_idx[cls]),
+                "class_name": cls,
+            }
+        )
     return samples, skipped
 
 
-def split_real_samples_random(samples, train_ratio, seed):
-    """
-    Stratified split by class_idx (kept function name for compatibility).
-    """
+def split_real_samples(samples, train_ratio, seed):
     if not samples:
         return [], []
 
@@ -279,36 +205,37 @@ def split_real_samples_random(samples, train_ratio, seed):
     if train_ratio >= 1.0:
         return list(samples), []
 
-    by_class = {}
-    for s in samples:
-        by_class.setdefault(int(s["class_idx"]), []).append(s)
+    labels = [int(s["class_idx"]) for s in samples]
+    counts = Counter(labels)
 
-    train = []
-    val = []
+    split_indices = [i for i, y in enumerate(labels) if counts[y] >= 2]
+    singleton_indices = [i for i, y in enumerate(labels) if counts[y] < 2]
 
-    for class_idx in sorted(by_class.keys()):
-        group = by_class[class_idx]
-        n = len(group)
+    train_indices = []
+    val_indices = []
 
-        rng = random.Random(seed + class_idx * 104729)
-        order = list(range(n))
-        rng.shuffle(order)
+    if split_indices:
+        split_labels = [labels[i] for i in split_indices]
+        n = len(split_indices)
+        n_classes = len(set(split_labels))
+        requested_train = int(round(n * train_ratio))
+        min_train = n_classes
+        max_train = n - n_classes
+        train_size = max(min_train, min(max_train, requested_train))
 
-        if n == 1:
-            # With one sample we cannot split; bias toward training so class is learnable.
-            train.append(group[order[0]])
-            continue
+        splitter = StratifiedShuffleSplit(
+            n_splits=1,
+            train_size=train_size,
+            random_state=int(seed),
+        )
+        idx_range = list(range(n))
+        train_rel, val_rel = next(splitter.split(idx_range, split_labels))
+        train_indices.extend(split_indices[i] for i in train_rel)
+        val_indices.extend(split_indices[i] for i in val_rel)
 
-        n_train = int(round(n * train_ratio))
-        # Best-effort stratification: keep both splits populated for n>=2.
-        n_train = max(1, min(n - 1, n_train))
-
-        train.extend(group[i] for i in order[:n_train])
-        val.extend(group[i] for i in order[n_train:])
-
-    rng_all = random.Random(seed + 99991)
-    rng_all.shuffle(train)
-    rng_all.shuffle(val)
+    train_indices.extend(singleton_indices)
+    train = [samples[i] for i in train_indices]
+    val = [samples[i] for i in val_indices]
     return train, val
 
 
@@ -363,25 +290,26 @@ def build_model(num_classes):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train static-icon classifier with in-memory augmentation.")
+    parser = argparse.ArgumentParser(
+        description="Train static icon classifier with synthetic + real data."
+    )
     parser.add_argument("--units-dir", type=str, default="assets/units")
     parser.add_argument("--real-dir", type=str, default="dataset_enemy_icons")
-    parser.add_argument("--real-train-ratio", type=float, default=0.9)
-    parser.add_argument("--real-mix-ratio-train", type=float, default=0.5)
+    parser.add_argument("--real-train-ratio", type=float, default=0.7 )
+    parser.add_argument("--real-mix-ratio-train", type=float, default=0.8)
     parser.add_argument("--real-mix-ratio-val", type=float, default=1.0)
     parser.add_argument("--out-dir", type=str, default="checkpoints")
     parser.add_argument("--image-size", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--small-min-px", type=int, default=50)
+    parser.add_argument("--small-max-px", type=int, default=85)
+    parser.add_argument("--max-shift-px", type=int, default=2)
+    parser.add_argument("--train-samples-per-class", type=int, default=10)
+    parser.add_argument("--val-samples-per-class", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--label-smoothing", type=float, default=0.0)
-    parser.add_argument("--train-samples-per-class", type=int, default=10)
-    parser.add_argument("--val-samples-per-class", type=int, default=10)
-    parser.add_argument("--template-size-px", type=int, default=150)
-    parser.add_argument("--small-min-px", type=int, default=50)
-    parser.add_argument("--small-max-px", type=int, default=85)
-    parser.add_argument("--max-shift-px", type=int, default=2)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--num-workers", type=int, default=0)
     return parser.parse_args()
@@ -389,6 +317,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if not (0.0 <= args.real_train_ratio <= 1.0):
+        raise RuntimeError("--real-train-ratio must be in [0, 1]")
+    if not (0.0 <= args.real_mix_ratio_train <= 1.0):
+        raise RuntimeError("--real-mix-ratio-train must be in [0, 1]")
+    if not (0.0 <= args.real_mix_ratio_val <= 1.0):
+        raise RuntimeError("--real-mix-ratio-val must be in [0, 1]")
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     units_dir = Path(args.units_dir)
     if not units_dir.exists():
         raise RuntimeError(f"Units directory not found: {units_dir}")
@@ -398,36 +339,24 @@ def main():
         raise RuntimeError(f"No unit template files found in: {units_dir}")
 
     class_names = [x["name"] for x in items]
-    num_classes = len(class_names)
     class_to_idx = {name: i for i, name in enumerate(class_names)}
-
-    if not (0.0 <= args.real_train_ratio <= 1.0):
-        raise RuntimeError("--real-train-ratio must be in [0, 1]")
-    if not (0.0 <= args.real_mix_ratio_train <= 1.0):
-        raise RuntimeError("--real-mix-ratio-train must be in [0, 1]")
-    if not (0.0 <= args.real_mix_ratio_val <= 1.0):
-        raise RuntimeError("--real-mix-ratio-val must be in [0, 1]")
 
     train_synth_ds = SyntheticIconDataset(
         items=items,
         image_size=args.image_size,
         samples_per_class=args.train_samples_per_class,
-        template_size_px=args.template_size_px,
         small_min_px=args.small_min_px,
         small_max_px=args.small_max_px,
         max_shift_px=args.max_shift_px,
-        seed=args.seed,
         train=True,
     )
     val_synth_ds = SyntheticIconDataset(
         items=items,
         image_size=args.image_size,
         samples_per_class=args.val_samples_per_class,
-        template_size_px=args.template_size_px,
         small_min_px=args.small_min_px,
         small_max_px=args.small_max_px,
-        max_shift_px=0,
-        seed=args.seed + 9999,
+        max_shift_px=args.max_shift_px,
         train=False,
     )
 
@@ -435,32 +364,24 @@ def main():
     real_val_ds = None
     real_dir = Path(args.real_dir)
     if real_dir.exists():
-        real_samples_all, real_skipped = scan_real_labeled(real_dir, class_to_idx)
-        real_train_samples, real_val_samples = split_real_samples_random(
-            real_samples_all, args.real_train_ratio, args.seed + 12345
+        real_all, real_skipped = scan_real_labeled(real_dir, class_to_idx)
+        real_train_samples, real_val_samples = split_real_samples(
+            real_all, args.real_train_ratio, args.seed
         )
 
         if real_train_samples:
             real_train_ds = RealIconDataset(
                 real_train_samples,
                 image_size=args.image_size,
-                template_size_px=args.template_size_px,
-                max_shift_px=args.max_shift_px,
-                seed=args.seed + 23456,
-                train=True,
             )
         if real_val_samples:
             real_val_ds = RealIconDataset(
                 real_val_samples,
                 image_size=args.image_size,
-                template_size_px=args.template_size_px,
-                max_shift_px=0,
-                seed=args.seed + 34567,
-                train=False,
             )
 
         print(
-            f"real labeled: total={len(real_samples_all)} "
+            f"real labeled: total={len(real_all)} "
             f"(skipped_unmatched={real_skipped}) | "
             f"train={len(real_train_samples)} val={len(real_val_samples)}"
         )
@@ -471,14 +392,12 @@ def main():
         synthetic_ds=train_synth_ds,
         real_ds=real_train_ds,
         real_ratio=args.real_mix_ratio_train,
-        seed=args.seed + 45678,
         train=True,
     )
     val_ds = MixedDataset(
         synthetic_ds=val_synth_ds,
         real_ds=real_val_ds,
         real_ratio=args.real_mix_ratio_val,
-        seed=args.seed + 56789,
         train=False,
     )
 
@@ -513,7 +432,7 @@ def main():
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model(num_classes).to(device)
+    model = build_model(num_classes=len(class_names)).to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     optimizer = torch.optim.AdamW(
@@ -521,7 +440,10 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+    )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = Path(args.out_dir) / f"unit_resnet18_{ts}.pt"
@@ -529,9 +451,6 @@ def main():
 
     best_val_loss = float("inf")
     for epoch in range(1, args.epochs + 1):
-        if hasattr(train_ds, "set_epoch"):
-            train_ds.set_epoch(epoch)
-
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc = evaluate(model, val_loader, criterion, device)
         scheduler.step()
@@ -547,9 +466,12 @@ def main():
             payload = {
                 "model_state_dict": model.state_dict(),
                 "class_names": class_names,
-                "image_size": args.image_size,
-                "normalize_mean": [0.5, 0.5, 0.5],
-                "normalize_std": [0.5, 0.5, 0.5],
+                "preprocess": {
+                    "mode": "pad_square_then_resize",
+                    "image_size": int(args.image_size),
+                    "mean": list(NORMALIZE_MEAN),
+                    "std": list(NORMALIZE_STD),
+                },
             }
             torch.save(payload, out_path)
             print(f"saved best -> {out_path} (val_loss={val_loss:.4f})")

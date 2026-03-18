@@ -430,10 +430,14 @@ class MainWindow(QMainWindow):
                 score = unit.get("score")
                 score_txt = _fmt_float(score, 2) if score is not None else "n/a"
                 label = {"team_a": "A", "team_b": "B", "team_c": "C"}.get(team, team)
-                row_prefix = f"{label}{idx} Lv{level}-{name} "
+                level_text = "???" if level is None else str(level)
+                row_prefix = f"{label}{idx} Lv{level_text}-{name} "
                 if name == "unknown":
                     box.setTextColor(self.c_bad)
                     box.insertPlainText(f"{row_prefix}{score_txt} (low confidence)\n")
+                elif level is None:
+                    box.setTextColor(self.c_bad)
+                    box.insertPlainText(f"{row_prefix}{score_txt}\n")
                 elif score is not None and score < UNIT_WARN_THRESHOLD:
                     box.setTextColor(self.c_text)
                     box.insertPlainText(row_prefix)
