@@ -12,10 +12,10 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
-    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -28,8 +28,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from onceworld.config.runtime import UNIT_WARN_THRESHOLD
+from onceworld.config.runtime import MONSTERS_CSV, UNIT_WARN_THRESHOLD
 from onceworld.core.detector import ScreenDetector
+from onceworld.core.name_localization import (
+    display_unit_name,
+    load_name_map,
+    localized_text,
+    normalize_lang,
+)
 
 
 def _fmt_pct(value):
@@ -61,6 +67,13 @@ class MainWindow(QMainWindow):
         self._base_window_height = 400
         self._font_targets = []
         self._enemy_text_boxes = []
+        self.name_language = None
+        self._last_results = None
+        self._name_jp_by_en = {}
+        self._unit_font_family_by_lang = {
+            "EN": "Cascadia Mono",
+            "JP": "MS Gothic",
+        }
 
         self.setWindowTitle("OnceWorld Arena")
         self.setMinimumSize(self._base_window_width, self._base_window_height)
@@ -77,8 +90,10 @@ class MainWindow(QMainWindow):
         self._check_ocr()
         self._init_palette()
         self._build_ui()
+
+        self.set_name_language("EN", rerender=False)
+        self._name_jp_by_en = load_name_map(MONSTERS_CSV)
         self._apply_scaled_fonts()
-        self._set_status("")
 
     def _set_app_icon(self):
         size = 64
@@ -212,7 +227,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 4, 6, 4)
         root.setSpacing(3)
         central.setLayout(root)
-        self.status_label = None
 
         top_cards = QHBoxLayout()
         top_cards.setSpacing(4)
@@ -237,7 +251,44 @@ class MainWindow(QMainWindow):
 
         self.win_coin_label = self._label("-", muted=True, bold=True)
         win_row.addWidget(self.win_coin_label, 0, Qt.AlignLeft)
+        self.lang_en_btn = QPushButton("EN")
+        self.lang_jp_btn = QPushButton("JP")
+        self.lang_group = QButtonGroup(self)
+        self.lang_group.setExclusive(True)
+        self.lang_group.addButton(self.lang_en_btn)
+        self.lang_group.addButton(self.lang_jp_btn)
+        for btn in (self.lang_en_btn, self.lang_jp_btn):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn_font = QFont("Segoe UI", 8)
+            btn_font.setWeight(QFont.DemiBold)
+            btn.setFont(btn_font)
+            self._register_font_target(btn, 8, min_pt=7, max_pt=14)
+            btn.setStyleSheet(
+                "QPushButton {"
+                " background-color: #0D1117;"
+                " color: #8B949E;"
+                " border: 1px solid #30363D;"
+                " border-radius: 4px;"
+                " padding: 1px 10px;"
+                "}"
+                "QPushButton:hover { border: 1px solid #58A6FF; }"
+                "QPushButton:checked {"
+                " background-color: #1F6FEB;"
+                " color: #FFFFFF;"
+                " border: 1px solid #58A6FF;"
+                "}"
+            )
+        self.lang_en_btn.setChecked(True)
+        self.lang_en_btn.toggled.connect(
+            lambda checked: checked and self.set_name_language("EN")
+        )
+        self.lang_jp_btn.toggled.connect(
+            lambda checked: checked and self.set_name_language("JP")
+        )
         win_row.addStretch()
+        win_row.addWidget(self.lang_en_btn, 0, Qt.AlignRight)
+        win_row.addWidget(self.lang_jp_btn, 0, Qt.AlignRight)
         card_win_layout.addLayout(win_row)
 
         self.scan_btn = QPushButton("Scan")
@@ -290,11 +341,11 @@ class MainWindow(QMainWindow):
             text.setStyleSheet(
                 "QTextEdit { background-color: #0D1117; color: #C9D1D9; border-radius: 4px; }"
             )
-            mono = QFont("Cascadia Mono", 8)
-            text.setFont(mono)
+            unit_font = self._make_unit_list_font(8, "EN")
+            text.setFont(unit_font)
             self._register_font_target(text, 8, min_pt=7, max_pt=14)
             self._enemy_text_boxes.append(text)
-            fm = QFontMetrics(mono)
+            fm = QFontMetrics(unit_font)
             text.setMinimumHeight(int(fm.lineSpacing() * 4 + 8))
             text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             row.addWidget(text, 1)
@@ -302,9 +353,39 @@ class MainWindow(QMainWindow):
             self.side_units[key] = {"coin": coin_lbl, "prob": prob_lbl, "list": text}
 
         root.addWidget(sides_frame, 1)
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setVisible(False)
+
+    def _normalize_name_language(self, language):
+        lang = normalize_lang(language)
+        if lang in self._unit_font_family_by_lang:
+            return lang
+        return "EN"
+
+    def _make_unit_list_font(self, point_size, language=None):
+        lang = self._normalize_name_language(language or self.name_language)
+        family = self._unit_font_family_by_lang[lang]
+        font = QFont(family, int(point_size))
+        font.setStyleHint(QFont.StyleHint.TypeWriter)
+        font.setFixedPitch(True)
+        return font
+
+    def _apply_unit_list_fonts(self):
+        font_template = self._make_unit_list_font(8, self.name_language)
+        for text in self._enemy_text_boxes:
+            font = text.font()
+            font.setFamily(font_template.family())
+            font.setStyleHint(QFont.StyleHint.TypeWriter)
+            font.setFixedPitch(True)
+            text.setFont(font)
+        self._apply_scaled_fonts()
+
+    def set_name_language(self, language, rerender=True):
+        lang = self._normalize_name_language(language)
+        if self.name_language == lang:
+            return
+        self.name_language = lang
+        self._apply_unit_list_fonts()
+        if rerender and self._last_results:
+            self._render_results(self._last_results)
 
     def _check_ocr(self):
         try:
@@ -316,24 +397,6 @@ class MainWindow(QMainWindow):
                 "Tesseract OCR not found.\nInstall Tesseract and set user_config.TESSERACT_CMD.",
             )
 
-    def _set_status(self, text):
-        _ = text
-        return
-
-    def _append_log(self, text, level=None):
-        color = "#C9D1D9"
-        if level == "bad":
-            color = "#F85149"
-        elif level == "warn":
-            color = "#D29922"
-        self.log_text.setTextColor(QColor(color))
-        self.log_text.append(text)
-        self.log_text.moveCursor(QTextCursor.End)
-        if len(self.log_text.toPlainText()) > 4000:
-            txt = self.log_text.toPlainText()
-            self.log_text.clear()
-            self.log_text.setText(txt[-3000:])
-
     def on_scan(self):
         if not self.detector:
             return
@@ -342,19 +405,17 @@ class MainWindow(QMainWindow):
         self.scan_btn.setEnabled(False)
         self.scan_btn.repaint()
         QApplication.processEvents()
-        self._set_status("")
-        self.log_text.clear()
+        self._last_results = None
         for key in self.side_units:
             self.side_units[key]["coin"].setText("Coin -")
             self.side_units[key]["list"].clear()
 
         try:
             results = self.detector.detect()
+            self._last_results = results
             self._render_results(results)
-            self._set_status("")
         except Exception as exc:
             QMessageBox.critical(self, "Scan", str(exc))
-            self._set_status("")
         finally:
             self.scan_btn.setStyleSheet(self._scan_btn_style_normal)
             self.scan_btn.setEnabled(True)
@@ -413,7 +474,7 @@ class MainWindow(QMainWindow):
             if not team_result.get("found"):
                 side["coin"].setText("Coin -")
                 box.clear()
-                box.append("none")
+                box.append(localized_text("na", self.name_language))
                 continue
 
             coins = team_result.get("coins")
@@ -421,20 +482,27 @@ class MainWindow(QMainWindow):
             box.clear()
             units = team_result.get("units", [])
             if not units:
-                box.append("none")
+                box.append(localized_text("na", self.name_language))
                 continue
 
             for idx, unit in enumerate(units, 1):
                 name = unit.get("unit_name")
+                display_name = display_unit_name(
+                    name,
+                    self.name_language,
+                    self._name_jp_by_en,
+                )
                 level = unit.get("level")
                 score = unit.get("score")
                 score_txt = _fmt_float(score, 2) if score is not None else "n/a"
                 label = {"team_a": "A", "team_b": "B", "team_c": "C"}.get(team, team)
                 level_text = "???" if level is None else str(level)
-                row_prefix = f"{label}{idx} Lv{level_text}-{name} "
+                row_prefix = f"{label}{idx} Lv{level_text}-{display_name} "
                 if name == "unknown":
                     box.setTextColor(self.c_bad)
-                    box.insertPlainText(f"{row_prefix}{score_txt} (low confidence)\n")
+                    box.insertPlainText(
+                        f"{row_prefix}{score_txt} ({localized_text('low_confidence', self.name_language)})\n"
+                    )
                 elif level is None:
                     box.setTextColor(self.c_bad)
                     box.insertPlainText(f"{row_prefix}{score_txt}\n")
@@ -442,7 +510,9 @@ class MainWindow(QMainWindow):
                     box.setTextColor(self.c_text)
                     box.insertPlainText(row_prefix)
                     box.setTextColor(self.c_warn)
-                    box.insertPlainText(f"{score_txt} (low confidence)\n")
+                    box.insertPlainText(
+                        f"{score_txt} ({localized_text('low_confidence', self.name_language)})\n"
+                    )
                 else:
                     box.setTextColor(self.c_text)
                     box.insertPlainText(f"{row_prefix}{score_txt}\n")
