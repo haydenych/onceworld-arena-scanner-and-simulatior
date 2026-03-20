@@ -1,6 +1,6 @@
 # OnceWorld Arena Scanner & Simulator
 
-Vibe-coding project, just for fun. No guaranteed maintenance.
+Personal for-fun project. No guaranteed maintenance.
 
 ## Demo
 
