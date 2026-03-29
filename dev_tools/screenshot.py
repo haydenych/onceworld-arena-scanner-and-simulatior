@@ -29,6 +29,7 @@ pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
 
 # Hardcoded portrait rectangle ratios on the captured monitor:
 # (x1, y1, x2, y2). Width is intentionally larger than height.
+# This window is for bluestacks with ads on the left panel !!!!
 PORTRAIT_RECT_1 = (0.35, 0.20, 0.635, 0.347)
 # Slightly lower variant for monsters whose portrait box sits lower.
 PORTRAIT_RECT_2 = (0.35, 0.307, 0.635, 0.454)
